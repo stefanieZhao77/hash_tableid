@@ -1,6 +1,6 @@
 # ID Anonymization Tool
 
-A simple tool to anonymize IDs across multiple files while maintaining relationships between different ID types.
+A simple tool to anonymize IDs across multiple files while maintaining relationships between different ID types. Supports csv and xlsx files.
 
 ## Installation
 
@@ -25,9 +25,9 @@ Data Files:
          │                     │                     │
          ▼                     ▼                     ▼
 ┌─────────────────────────────────────────────────────────┐
-│                    mapping.csv                          │
+│                    mapping.csv                        |
 ├───────────┬──────────┬──────────────┬─────────────────┤
-│mapping_file│mapping_id│ source_file  │   source_id     │
+│mapping_file│mapping_id│ source_file  │   source_id    │
 ├───────────┬──────────┬──────────────┬─────────────────┤
 │table4.csv │   id_b   │ table1.csv   │   id_a          │
 │table4.csv │   id_b   │ table2.csv   │   id_b          │
@@ -35,8 +35,8 @@ Data Files:
 └───────────┴──────────┴──────────────┴─────────────────┘
                           │
                           ▼
-┌─────────────────────────────────────────────┐
-│              table4.csv                     │
+┌───────────────────────────────────────────┐
+│              table4.csv                   |
 ├───────────┬──────────┬────────────────────┤
 │   id_b    │   id_c   │                    │
 ├───────────┬──────────┬────────────────────┤
@@ -89,6 +89,3 @@ The tool will:
 - Clear error messages if something goes wrong
 - Lookup table for tracking ID relationships
 
-## Support
-
-For assistance, please contact your IT support team.

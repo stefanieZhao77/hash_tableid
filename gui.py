@@ -27,9 +27,9 @@ class IDProcessorGUI:
 
 1. Create a mapping.csv file with these columns:
    - mapping_file: The file containing ID relationships (e.g., mapping.csv)
-   - mapping_id: The ID column in the mapping file (e.g., MRN, mobi_id)
-   - source_file: The file to be anonymized (e.g., patient_data.csv)
-   - source_id: The ID column in the source file
+   - mapping_id: The ID column in the mapping file (e.g., id_a  , id_b)
+   - source_file: The file to be anonymized (e.g., table1.csv)
+   - source_id: The ID column in the source file (e.g., id_a, id_b)
 
 2. Click 'Browse' to select your mapping.csv file
 
