@@ -62,11 +62,13 @@ All unique IDs (not in the mapping file) will be replaced with a new set of uniq
    - `mapping_id`: The ID column in the mapping file (e.g., id_b, id_c)
    - `source_file`: The file to be anonymized (e.g., table1.csv)
    - `source_id`: The ID column in the source file (e.g., id_a)
+   - `processed`: (Optional) Boolean column to track processing status, don't recommand to change it manually unless you want to reprocess the file again
 
 3. Use the GUI to:
    - Click 'Browse' to select your mapping.csv file
    - Click 'Start Processing' to begin anonymization
-   - Check the success message for results
+   - Click 'Stop Processing' to pause at any time
+   - Monitor progress in real-time through status messages
 
 ### Command Line Interface (Advanced)
 
@@ -80,7 +82,8 @@ python id_processor.py mapping.csv
 The tool will:
 1. Create backup files with '.backup' extension
 2. Update the original files with hashed IDs
-3. Create 'id_lookup_table.csv' showing original and hashed IDs
+3. Create and maintain 'id_lookup_table.csv' showing original and hashed IDs
+4. Update the mapping file with processing status
 
 ## Safety Features
 
@@ -88,4 +91,7 @@ The tool will:
 - Consistent hashing ensures related IDs get the same hash
 - Clear error messages if something goes wrong
 - Lookup table for tracking ID relationships
+- Process tracking to avoid reprocessing files
+- Safe handling of already hashed IDs (preserves existing hashes)
+
 

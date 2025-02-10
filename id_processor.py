@@ -3,21 +3,69 @@ import networkx as nx
 import hashlib
 import uuid
 from pathlib import Path
+import tempfile
+import os
+import shutil
 from typing import Dict, List, Set, Union
 from tqdm import tqdm
+import time
+import gc
+import random
 
 
 class IDProcessor:
-    def __init__(self):
+    def __init__(self, progress_callback=None, status_callback=None):
         self.hash_table: Dict[str, str] = {}
+        self.processed_files: Set[Path] = set()  # Track processed files
+        self.is_running: bool = False
+        self.progress_callback = progress_callback
+        self.status_callback = status_callback
+        self._load_existing_lookup_table()
         
+    def _send_status(self, message: str) -> None:
+        """Send a status message to the GUI."""
+        if self.status_callback:
+            self.status_callback(message)
+        print(message)  # Also print to console
+        
+    def _load_existing_lookup_table(self) -> None:
+        """Load existing lookup table if it exists."""
+        lookup_path = Path('id_lookup_table.csv')
+        if lookup_path.exists():
+            try:
+                lookup_df = pd.read_csv(lookup_path)
+                # Create bidirectional mapping
+                for _, row in lookup_df.iterrows():
+                    original_id = str(row['original_id'])
+                    hashed_id = str(row['hashed_id'])
+                    self.hash_table[original_id] = hashed_id
+                self._send_status(f"Loaded {len(lookup_df)} existing ID mappings from lookup table")
+            except Exception as e:
+                self._send_status(f"Warning: Could not load existing lookup table: {str(e)}")
+
+    def stop(self) -> None:
+        """Stop the processing."""
+        self.is_running = False
+        print("Processing will stop after current file completes...")
+
     def hash_id(self, id_value: str) -> str:
         """Hash an ID using SHA-256."""
         if not isinstance(id_value, str):
             id_value = str(id_value)
-        if id_value not in self.hash_table:
-            self.hash_table[id_value] = hashlib.sha256(id_value.encode()).hexdigest()
-        return self.hash_table[id_value]
+            
+        # If the ID is already in our hash table (either as original or hashed), return the hashed value
+        if id_value in self.hash_table:
+            return self.hash_table[id_value]
+            
+        # Check if the input looks like a SHA-256 hash (64 hex characters)
+        if len(id_value) == 64 and all(c in '0123456789abcdef' for c in id_value.lower()):
+            self.hash_table[id_value] = id_value
+            return id_value
+            
+        # If not found and not a hash, create new hash
+        hashed_value = hashlib.sha256(id_value.encode()).hexdigest()
+        self.hash_table[id_value] = hashed_value
+        return hashed_value
 
     def read_file(self, file_path: Path) -> pd.DataFrame:
         """Read CSV or Excel file."""
@@ -34,45 +82,32 @@ class IDProcessor:
         except Exception as e:
             raise ValueError(f"Failed to read file {file_path}: {str(e)}")
 
-    def find_files(self, base_path: Path, mapping_df: pd.DataFrame) -> List[Path]:
-        """Find all files mentioned in the mapping file, searching recursively if needed."""
+    def find_files(self, mapping_df: pd.DataFrame) -> List[Path]:
+        """Find all files mentioned in the mapping file."""
         files = set()
         
-        def find_file_in_directory(filename: str, search_path: Path) -> Path:
-            """Search for a file recursively in all subdirectories."""
-            # First try direct match
-            if (search_path / filename).exists():
-                return search_path / filename
-                
-            # Search in all subdirectories
-            for path in search_path.rglob("*"):
-                if path.is_dir():
-                    potential_file = path / filename
-                    if potential_file.exists():
-                        return potential_file
-            
-            raise ValueError(f"File {filename} not found in {search_path} or its subdirectories")
+        def resolve_file_path(file_path: str) -> Path:
+            """Resolve file path, checking if it's absolute or relative."""
+            path = Path(file_path)
+            if path.is_absolute() and path.exists():
+                return path
+            raise ValueError(f"File {file_path} not found or is not an absolute path")
         
         # Add the mapping file
         mapping_file = mapping_df['mapping_file'].iloc[0]
         try:
-            mapping_path = find_file_in_directory(mapping_file, base_path)
+            mapping_path = resolve_file_path(mapping_file)
             files.add(mapping_path)
         except ValueError as e:
-            raise ValueError(f"Mapping file {mapping_file} not found in {base_path} or its subdirectories")
+            raise ValueError(f"Mapping file {mapping_file} not found or is not an absolute path")
         
         # Add all source files
         for file_path in mapping_df['source_file'].unique():
             try:
-                full_path = find_file_in_directory(file_path, base_path)
+                full_path = resolve_file_path(file_path)
                 files.add(full_path)
             except ValueError as e:
-                # Try as absolute path if relative path search fails
-                abs_path = Path(file_path)
-                if abs_path.exists():
-                    files.add(abs_path)
-                else:
-                    raise ValueError(f"Source file {file_path} not found in {base_path} or its subdirectories")
+                raise ValueError(f"Source file {file_path} not found or is not an absolute path")
         
         return list(files)
 
@@ -101,22 +136,93 @@ class IDProcessor:
 
     def update_file_ids(self, file_path: Path, id_column: str, id_mapping: Dict[str, str]) -> None:
         """Update IDs in a file using the provided ID mapping."""
+        if not self.is_running:
+            self._send_status(f"Skipping {file_path} as processing was stopped")
+            return
+
+        # Check if file has already been processed
+        if file_path in self.processed_files:
+            self._send_status(f"Skipping {file_path} - already processed")
+            return
+
+        self._send_status(f"Processing file: {file_path}")
         df = self.read_file(file_path)
         
         if id_column not in df.columns:
             raise ValueError(f"Column {id_column} not found in {file_path}")
         
-        # Update the ID column with hashed values
-        df[id_column] = df[id_column].astype(str).map(lambda x: id_mapping.get(x, self.hash_id(x)))
+        # Count how many IDs will be updated
+        original_ids = df[id_column].astype(str).unique()
+        self._send_status(f"Found {len(original_ids)} unique IDs to process in {file_path}")
         
-        # Save back to file
+        # Update the ID column with hashed values, skipping already processed IDs
+        # Skip IDs that are already hashed (have same length as SHA-256 hash)
+        df[id_column] = df[id_column].astype(str).map(lambda x: x if len(x) == 64 else id_mapping.get(x, self.hash_id(x)))
+        
+        # Create a temporary file in the same directory as the target file
+        temp_dir = file_path.parent
         suffix = file_path.suffix.lower()
-        if suffix == '.csv':
-            df.to_csv(file_path, index=False)
-        elif suffix == '.xlsx':
-            df.to_excel(file_path, index=False, engine='openpyxl')
-        elif suffix == '.xls':
-            df.to_excel(file_path, index=False, engine='xlwt')
+        
+        # Generate a unique temporary filename
+        temp_suffix = f"_{random.randint(1000, 9999)}{suffix}"
+        temp_path = temp_dir / f"temp{temp_suffix}"
+        
+        try:
+            self._send_status(f"Saving updated file: {file_path}")
+            # First, write to the temporary file
+            if suffix == '.csv':
+                df.to_csv(temp_path, index=False)
+            elif suffix == '.xlsx':
+                with pd.ExcelWriter(str(temp_path), engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
+            elif suffix == '.xls':
+                with pd.ExcelWriter(str(temp_path), engine='xlwt') as writer:
+                    df.to_excel(writer, index=False)
+            
+            # Force sync to ensure file is written
+            if hasattr(os, 'sync'):
+                os.sync()
+            
+            # Give some time for the file system to finish writing
+            time.sleep(1)
+            
+            # Now try to replace the original file
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    # First, try to remove the original file if it exists
+                    if file_path.exists():
+                        os.remove(file_path)
+                        time.sleep(0.5)  # Wait a bit after deletion
+                    
+                    # Now try to rename the temp file
+                    os.rename(temp_path, file_path)
+                    self._send_status(f"Successfully updated {file_path}")
+                    self.processed_files.add(file_path)  # Mark file as processed
+                    break
+                except Exception as e:
+                    if attempt == max_attempts - 1:  # Last attempt
+                        raise
+                    self._send_status(f"Attempt {attempt + 1} failed, retrying...")
+                    time.sleep(2)  # Wait before retry
+                    gc.collect()  # Force garbage collection
+                
+        except Exception as e:
+            # Clean up temporary file if it exists
+            if temp_path.exists():
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            raise Exception(f"Failed to update file {file_path}: {str(e)}")
+        finally:
+            # Final cleanup
+            if temp_path.exists():
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            gc.collect()
 
     def create_lookup_table(self, id_mapping: Dict[str, str]) -> pd.DataFrame:
         """Create a lookup table of original IDs and their hashed values."""
@@ -131,13 +237,13 @@ class IDProcessor:
         
         # Then add any additional IDs that were hashed
         for original_id, hashed_id in self.hash_table.items():
-            if original_id not in id_mapping:
+            # Skip if original ID is already in mapping or if hashed ID is in mapping
+             if original_id not in id_mapping:
                 records.append({
                     'original_id': original_id,
                     'hashed_id': hashed_id,
                     'from_mapping': False
                 })
-        
         return pd.DataFrame(records)
 
     def create_backup(self, file_path: Path) -> Path:
@@ -149,6 +255,9 @@ class IDProcessor:
 
     def process_all_files(self, mapping_path: Path) -> None:
         """Process all files based on the mapping file."""
+        self.is_running = True
+        self._send_status(f"Starting processing with mapping file: {mapping_path}")
+        
         if not mapping_path.exists():
             raise ValueError(f"Mapping file {mapping_path} not found")
             
@@ -158,6 +267,22 @@ class IDProcessor:
                 mapping_df = pd.read_csv(mapping_path)
             else:
                 mapping_df = pd.read_excel(mapping_path, engine='openpyxl')
+                
+            # Initialize or update the processed column
+            if 'processed' not in mapping_df.columns:
+                # If the column doesn't exist, add it and set all values to False
+                mapping_df.loc[:, 'processed'] = False
+                # Save the updated mapping file with the new column
+                if mapping_path.suffix.lower() == '.csv':
+                    mapping_df.to_csv(mapping_path, index=False)
+                else:
+                    mapping_df.to_excel(mapping_path, index=False)
+                self._send_status("Added 'processed' column to mapping file to record file status")
+            else:
+                # Convert existing processed column to boolean, treating NaN as False
+                mapping_df['processed'] = mapping_df['processed'].fillna(False).astype(bool)
+                
+            self._send_status(f"Successfully read mapping file with {len(mapping_df)} entries")
         except Exception as e:
             raise ValueError(f"Could not read mapping file {mapping_path}: {str(e)}")
             
@@ -165,42 +290,94 @@ class IDProcessor:
         if not all(col in mapping_df.columns for col in required_cols):
             raise ValueError(f"Missing required columns {required_cols} in {mapping_path}")
         
-        # Find all files
-        base_path = mapping_path.parent
-        files = self.find_files(base_path, mapping_df)
+        # Find all files using paths from mapping file
+        files = self.find_files(mapping_df)
+        total_files = len(files)
+        
+        # Get unprocessed rows using boolean indexing
+        unprocessed_rows = mapping_df[mapping_df['processed'] == False]
+        self._send_status(f"Found {len(unprocessed_rows)} files to process ({len(mapping_df) - len(unprocessed_rows)} already processed)")
+        
+        if len(unprocessed_rows) == 0:
+            self._send_status("No files to process - all files are marked as processed")
+            if self.progress_callback:
+                self.progress_callback(100)
+            return
         
         # Create backups of source files before modification
         backups = {}
-        for file_path in files:
-            if file_path.name != mapping_df['mapping_file'].iloc[0]:  # Don't backup mapping file
-                backups[file_path] = self.create_backup(file_path)
+        for i, (_, row) in enumerate(unprocessed_rows.iterrows()):
+            source_path = Path(row['source_file'])
+            if source_path.name != mapping_df['mapping_file'].iloc[0] and not row['processed']:
+                backups[source_path] = self.create_backup(source_path)
+                self._send_status(f"Created backup of {source_path}")
+            if self.progress_callback:
+                self.progress_callback(int((i / total_files) * 20))  # First 20% for backups
         
         try:
             # First, get the mapping file to establish ID relationships
-            mapping_file = mapping_df['mapping_file'].iloc[0]
-            mapping_file_path = next(f for f in files if f.name == mapping_file)
+            # Get mapping file from unprocessed rows
+            mapping_file = unprocessed_rows['mapping_file'].iloc[0]
+            mapping_file_path = next(f for f in files if f.name == Path(mapping_file).name)
             
             # Create ID mapping based on relationships in mapping file
+            self._send_status("Creating ID mappings from relationships...")
             id_mapping = self.create_id_mapping(mapping_file_path, mapping_df)
+            self._send_status(f"Created {len(id_mapping)} ID mappings")
+            if self.progress_callback:
+                self.progress_callback(25)  # 25% after creating ID mapping
             
             # Process each source file
-            for _, row in mapping_df.iterrows():
+            total_rows = len(unprocessed_rows)
+            processed_files = 0
+            
+            for i, (idx, row) in enumerate(unprocessed_rows.iterrows()):
+                if not self.is_running:
+                    self._send_status("Processing stopped by user")
+                    break
+                
                 source_file = row['source_file']
                 source_id = row['source_id']
                 source_path = next(f for f in files if f.name == Path(source_file).name)
-                if source_path.name != mapping_file:  # Skip mapping file
+                
+                if source_path.name != mapping_file and not row['processed']:  # Skip mapping file and processed files
                     self.update_file_ids(source_path, source_id, id_mapping)
-            
-            # Create and save lookup table
+                    processed_files += 1
+                    # Update processed status in the DataFrame
+                    mapping_df.loc[idx, 'processed'] = True
+                    
+                    # Save the updated mapping file after each successful file processing
+                    if mapping_path.suffix.lower() == '.csv':
+                        mapping_df.to_csv(mapping_path, index=False)
+                    else:
+                        mapping_df.to_excel(mapping_path, index=False)
+                    self._send_status(f"Updated processing status in mapping file")
+                    
+                if self.progress_callback:
+                    # Progress from 25% to 90% during file processing
+                    progress = 25 + int((i + 1) / total_rows * 65)
+                    self.progress_callback(progress)
+
+             # Update lookup table after each file is processed
             lookup_df = self.create_lookup_table(id_mapping)
-            lookup_path = base_path / 'id_lookup_table.csv'
+            lookup_path = Path('id_lookup_table.csv')
             lookup_df.to_csv(lookup_path, index=False)
-            print(f"Created lookup table at: {lookup_path}")
-            print("Created backups of original files with '.backup' extension")
+            self._send_status(f"Updated lookup table with {len(lookup_df)} entries")
+
+            if self.progress_callback:
+                self.progress_callback(100)  # Complete
+            
+            if not self.is_running:
+                self._send_status("Processing was stopped by user. All processed files and IDs have been saved.")
+            else:
+                self._send_status(f"Processing complete: {processed_files} files processed")
+                self._send_status("All files have been backed up with '.backup' extension")
             
         except Exception as e:
-            print(f"Error occurred: {str(e)}")
-            print("Original files have been preserved with '.backup' extension")
+            self._send_status(f"Error during processing: {str(e)}")
+            raise
+        finally:
+            self.is_running = False
 
 
 def main():
@@ -223,4 +400,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
