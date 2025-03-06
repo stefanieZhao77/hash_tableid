@@ -16,6 +16,7 @@ import random
 class IDProcessor:
     def __init__(self, progress_callback=None, status_callback=None):
         self.hash_table: Dict[str, str] = {}
+        self.not_hashed_ids: Set[str] = set()  # Track IDs that weren't hashed
         self.processed_files: Set[Path] = set()  # Track processed files
         self.is_running: bool = False
         self.progress_callback = progress_callback
@@ -111,13 +112,14 @@ class IDProcessor:
         
         return list(files)
 
-    def create_id_mapping(self, mapping_file_path: Path, mapping_df: pd.DataFrame) -> Dict[str, str]:
+    def create_id_mapping(self, mapping_file_path: Path, mapping_df: pd.DataFrame) -> tuple[Dict[str, str], Dict[str, str]]:
         """Create a mapping of original IDs to hashed IDs based on relationships in mapping file."""
-        # Read the mapping table (e.g., table4.csv)
+        # Read the mapping table
         mapping_table = self.read_file(mapping_file_path)
         
-        # Create a dictionary to store ID relationships
+        # Create dictionaries to store ID relationships and consent status
         id_mapping = {}
+        consent_status_mapping = {}
         
         # First, establish relationships from the mapping table
         for _, row in mapping_table.iterrows():
@@ -126,16 +128,26 @@ class IDProcessor:
                 if col in row and pd.notna(row[col]):
                     ids_in_row.append(str(row[col]))
             
-            # If we found related IDs, hash the first one and use it for all related IDs
+            # Get consent status for this row, default to "none" if not present
+            consent_status = str(row.get('consent_status', 'none')).lower()
+            if consent_status not in ['granted', 'revoked', 'none', 'id not found']:
+                consent_status = 'none'
+            
+            # If we found related IDs, process them based on consent status
             if ids_in_row:
-                hashed_id = self.hash_id(ids_in_row[0])
+                # Only hash IDs if consent is granted
+                if consent_status == 'granted':
+                    hashed_id = self.hash_id(ids_in_row[0])
+                    for id_val in ids_in_row:
+                        id_mapping[id_val] = hashed_id
+                # Store consent status for all IDs in the row
                 for id_val in ids_in_row:
-                    id_mapping[id_val] = hashed_id
+                    consent_status_mapping[id_val] = consent_status
         
-        return id_mapping
+        return id_mapping, consent_status_mapping
 
-    def update_file_ids(self, file_path: Path, id_column: str, id_mapping: Dict[str, str]) -> None:
-        """Update IDs in a file using the provided ID mapping."""
+    def update_file_ids(self, file_path: Path, id_column: str, id_mapping: Dict[str, str], consent_status_mapping: Dict[str, str]) -> None:
+        """Update IDs in a file using the provided ID mapping and create training table."""
         if not self.is_running:
             self._send_status(f"Skipping {file_path} as processing was stopped")
             return
@@ -155,9 +167,19 @@ class IDProcessor:
         original_ids = df[id_column].astype(str).unique()
         self._send_status(f"Found {len(original_ids)} unique IDs to process in {file_path}")
         
-        # Update the ID column with hashed values, skipping already processed IDs
-        # Skip IDs that are already hashed (have same length as SHA-256 hash)
-        df[id_column] = df[id_column].astype(str).map(lambda x: x if len(x) == 64 else id_mapping.get(x, self.hash_id(x)))
+        # Add consent_status column to original table
+        df['consent_status'] = df[id_column].astype(str).map(lambda x: consent_status_mapping.get(x, 'ID not found'))
+        
+        # Track IDs that aren't being hashed
+        for id_val in original_ids:
+            if str(id_val) not in id_mapping:
+                self.not_hashed_ids.add(str(id_val))
+        
+        # Create training table with only granted consent records and hashed IDs
+        training_df = df[df['consent_status'] == 'granted'].copy()
+        # Update IDs in training table only
+        training_df[id_column] = training_df[id_column].astype(str).map(lambda x: id_mapping.get(x, x))
+        training_file_path = file_path.parent / f"{file_path.stem}_training{file_path.suffix}"
         
         # Create a temporary file in the same directory as the target file
         temp_dir = file_path.parent
@@ -168,16 +190,21 @@ class IDProcessor:
         temp_path = temp_dir / f"temp{temp_suffix}"
         
         try:
-            self._send_status(f"Saving updated file: {file_path}")
+            self._send_status(f"Saving updated files: {file_path} and {training_file_path}")
             # First, write to the temporary file
             if suffix == '.csv':
                 df.to_csv(temp_path, index=False)
+                training_df.to_csv(training_file_path, index=False)
             elif suffix == '.xlsx':
                 with pd.ExcelWriter(str(temp_path), engine='openpyxl') as writer:
                     df.to_excel(writer, index=False)
+                with pd.ExcelWriter(str(training_file_path), engine='openpyxl') as writer:
+                    training_df.to_excel(writer, index=False)
             elif suffix == '.xls':
                 with pd.ExcelWriter(str(temp_path), engine='xlwt') as writer:
                     df.to_excel(writer, index=False)
+                with pd.ExcelWriter(str(training_file_path), engine='xlwt') as writer:
+                    training_df.to_excel(writer, index=False)
             
             # Force sync to ensure file is written
             if hasattr(os, 'sync'):
@@ -197,7 +224,7 @@ class IDProcessor:
                     
                     # Now try to rename the temp file
                     os.rename(temp_path, file_path)
-                    self._send_status(f"Successfully updated {file_path}")
+                    self._send_status(f"Successfully updated {file_path} and created {training_file_path}")
                     self.processed_files.add(file_path)  # Mark file as processed
                     break
                 except Exception as e:
@@ -224,26 +251,51 @@ class IDProcessor:
                     pass
             gc.collect()
 
-    def create_lookup_table(self, id_mapping: Dict[str, str]) -> pd.DataFrame:
+    def create_lookup_table(self, id_mapping: Dict[str, str], consent_status_mapping: Dict[str, str]) -> pd.DataFrame:
         """Create a lookup table of original IDs and their hashed values."""
         records = []
-        # First add all IDs from the mapping
-        for original_id, hashed_id in id_mapping.items():
-            records.append({
-                'original_id': original_id,
-                'hashed_id': hashed_id,
-                'from_mapping': True
-            })
+        processed_ids = set()
         
-        # Then add any additional IDs that were hashed
-        for original_id, hashed_id in self.hash_table.items():
-            # Skip if original ID is already in mapping or if hashed ID is in mapping
-             if original_id not in id_mapping:
+        # First add all IDs from the mapping that have granted consent
+        for original_id, hashed_id in id_mapping.items():
+            if consent_status_mapping.get(original_id) == 'granted':
                 records.append({
                     'original_id': original_id,
                     'hashed_id': hashed_id,
-                    'from_mapping': False
+                    'consent_status': 'granted',
+                    'from_mapping': True
                 })
+                processed_ids.add(original_id)
+        
+        # Then add any additional IDs that were hashed and have granted consent
+        for original_id, hashed_id in self.hash_table.items():
+            if original_id not in processed_ids and consent_status_mapping.get(original_id) == 'granted':
+                records.append({
+                    'original_id': original_id,
+                    'hashed_id': hashed_id,
+                    'consent_status': 'granted'
+                })
+                processed_ids.add(original_id)
+        
+        # Add all remaining IDs from consent_status_mapping that weren't processed
+        for original_id, status in consent_status_mapping.items():
+            if original_id not in processed_ids:
+                records.append({
+                    'original_id': original_id,
+                    'hashed_id': original_id,  # Use original ID as no hashing was done
+                    'consent_status': status
+                })
+                processed_ids.add(original_id)
+        
+        # Add all non-hashed IDs that we found in the data tables
+        for original_id in self.not_hashed_ids:
+            if original_id not in processed_ids:
+                records.append({
+                    'original_id': original_id,
+                    'hashed_id': original_id,  # Use original ID as no hashing was done
+                    'consent_status': 'ID not found',
+                })
+        
         return pd.DataFrame(records)
 
     def create_backup(self, file_path: Path) -> Path:
@@ -322,7 +374,7 @@ class IDProcessor:
             
             # Create ID mapping based on relationships in mapping file
             self._send_status("Creating ID mappings from relationships...")
-            id_mapping = self.create_id_mapping(mapping_file_path, mapping_df)
+            id_mapping, consent_status_mapping = self.create_id_mapping(mapping_file_path, mapping_df)
             self._send_status(f"Created {len(id_mapping)} ID mappings")
             if self.progress_callback:
                 self.progress_callback(25)  # 25% after creating ID mapping
@@ -341,7 +393,7 @@ class IDProcessor:
                 source_path = next(f for f in files if f.name == Path(source_file).name)
                 
                 if source_path.name != mapping_file and not row['processed']:  # Skip mapping file and processed files
-                    self.update_file_ids(source_path, source_id, id_mapping)
+                    self.update_file_ids(source_path, source_id, id_mapping, consent_status_mapping)
                     processed_files += 1
                     # Update processed status in the DataFrame
                     mapping_df.loc[idx, 'processed'] = True
@@ -359,7 +411,7 @@ class IDProcessor:
                     self.progress_callback(progress)
 
              # Update lookup table after each file is processed
-            lookup_df = self.create_lookup_table(id_mapping)
+            lookup_df = self.create_lookup_table(id_mapping, consent_status_mapping)
             lookup_path = Path('id_lookup_table.csv')
             lookup_df.to_csv(lookup_path, index=False)
             self._send_status(f"Updated lookup table with {len(lookup_df)} entries")

@@ -25,9 +25,9 @@ Data Files:
          │                     │                     │
          ▼                     ▼                     ▼
 ┌─────────────────────────────────────────────────────────┐
-│                    mapping.csv                        |
+│                    mapping.csv                          │
 ├───────────┬──────────┬──────────────┬─────────────────┤
-│mapping_file│mapping_id│ source_file  │   source_id    │
+│mapping_file│mapping_id│ source_file  │   source_id     │
 ├───────────┬──────────┬──────────────┬─────────────────┤
 │table4.csv │   id_b   │ table1.csv   │   id_a          │
 │table4.csv │   id_b   │ table2.csv   │   id_b          │
@@ -35,18 +35,36 @@ Data Files:
 └───────────┴──────────┴──────────────┴─────────────────┘
                           │
                           ▼
-┌───────────────────────────────────────────┐
-│              table4.csv                   |
-├───────────┬──────────┬────────────────────┤
-│   id_b    │   id_c   │                    │
-├───────────┬──────────┬────────────────────┤
-│   B123    │   C01    │  ← Same entity     │
-└───────────┴──────────┴────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│              table4.csv (Mapping Table)               │
+├───────────┬──────────┬────────────────┬──────────────┤
+│   id_b    │   id_c   │ consent_status │              │
+├───────────┬──────────┬────────────────┬──────────────┤
+│   B123    │   C01    │    granted     │ ← Same entity│
+└───────────┴──────────┴────────────────┴──────────────┘
 
-After processing, all IDs for the same entity will be replaced 
-with the same hashed value across all files.
-All unique IDs (not in the mapping file) will be replaced with a new set of unique IDs.
+After processing:
+1. Only IDs with 'granted' consent will be hashed in training tables
+2. Original tables will keep original IDs with added consent status
+3. All IDs for the same entity with 'granted' consent will have the same hash
+4. IDs not in the mapping file will be marked as 'ID not found'
 ```
+
+## Consent Status Feature
+
+The tool now supports consent status management:
+
+1. **Consent Status Types**:
+   - `granted`: IDs will be hashed in training tables
+   - `revoked`: IDs will not be hashed, original values preserved
+   - `none`: IDs will not be hashed, original values preserved
+   - `ID not found`: Automatically assigned to IDs not in the mapping table
+
+2. **How It Works**:
+   - Add a `consent_status` column to your mapping table (the file specified in `mapping_file` column, e.g., table4.csv)
+   - Only IDs with 'granted' status will be hashed in training tables
+   - Original tables keep original IDs with added consent status column
+   - Training tables (`<filename>_training.<extension>`) are created with only 'granted' consent records and hashed IDs
 
 ## Usage
 
@@ -62,9 +80,14 @@ All unique IDs (not in the mapping file) will be replaced with a new set of uniq
    - `mapping_id`: The ID column in the mapping file (e.g., id_b, id_c)
    - `source_file`: The file to be anonymized (e.g., table1.csv)
    - `source_id`: The ID column in the source file (e.g., id_a)
-   - `processed`: (Optional) Boolean column to track processing status, don't recommand to change it manually unless you want to reprocess the file again
+   - `processed`: (Optional) Boolean column to track processing status, don't recommend changing it manually unless you want to reprocess the file again
 
-3. Use the GUI to:
+3. Ensure your mapping table (specified in `mapping_file` column) has a `consent_status` column with values:
+   - `granted`: For IDs that should be hashed
+   - `revoked`: For IDs that should not be hashed
+   - `none`: For IDs with no specific consent status
+
+4. Use the GUI to:
    - Click 'Browse' to select your mapping.csv file
    - Click 'Start Processing' to begin anonymization
    - Click 'Stop Processing' to pause at any time
@@ -81,9 +104,10 @@ python id_processor.py mapping.csv
 
 The tool will:
 1. Create backup files with '.backup' extension
-2. Update the original files with hashed IDs
-3. Create and maintain 'id_lookup_table.csv' showing original and hashed IDs
-4. Update the mapping file with processing status
+2. Update the original files with added consent status column (original IDs preserved)
+3. Create training tables (`<filename>_training.<extension>`) with only 'granted' consent records and hashed IDs
+4. Create and maintain 'id_lookup_table.csv' showing original and hashed IDs with consent status
+5. Update the mapping file with processing status
 
 ## Safety Features
 
@@ -93,5 +117,6 @@ The tool will:
 - Lookup table for tracking ID relationships
 - Process tracking to avoid reprocessing files
 - Safe handling of already hashed IDs (preserves existing hashes)
+- Consent status tracking for compliance with data usage requirements
 
 
