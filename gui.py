@@ -25,15 +25,36 @@ class IDProcessorGUI:
         
         self.instructions = tk.Text(self.instructions_frame, height=8, width=70)
         self.instructions.pack(padx=10, pady=10)
-        self.instructions.insert("1.0", """1. Create a mapping.csv file with these columns:
-   - mapping_file: The file containing ID relationships (e.g., mapping.csv)
+        self.instructions.insert("1.0", """1. Create a mapping.csv file with these columns (ALL PATHS MUST BE ABSOLUTE):
+   LEGACY FORMAT:
+   - mapping_file: Full path to mapping file (e.g., D:\\path\\to\\mapping.csv)
    - mapping_id: The ID column in the mapping file (e.g., id_a, id_b)
-   - source_file: The file to be anonymized (e.g., table1.csv)
+   - source_file: Full path to file to be anonymized (e.g., D:\\path\\to\\table1.csv)
    - source_id: The ID column in the source file (e.g., id_a, id_b)
+   
+   NEW ENHANCED FORMAT (Recommended for shared IDs):
+   - mapping_file: Full path to mapping file (e.g., D:\\path\\to\\id-map.csv)
+   - mapping_id: Not used in new format
+   - source_file: Full path to file to be anonymized (e.g., D:\\path\\to\\table1.csv)
+   - source_id: The ID column in the source file (e.g., mobi_id)
+   - id_type: Type of ID being processed (e.g., mobi_id, mrn)
+   - source_context: Context for ID resolution (e.g., study_main)
 
-2. Click 'Browse' to select your mapping.csv file
-3. Click 'Start Processing' to begin anonymization
-4. Click 'Stop Processing' to stop the current processing operation""")
+2. Your mapping table (id-map.csv) should have these columns:
+   - person_id: Unique identifier for each person (e.g., PERSON_001)
+   - id_value: The actual ID value
+   - id_type: Type of ID (mobi_id, mrn, etc.)
+   - source_context: Context where this ID is valid
+   - priority: Priority for conflict resolution (1=highest)
+   - consent_status: granted/revoked/none
+   - effective_date: When this ID relationship became valid
+   - notes: Additional context
+
+3. Click 'Browse' to select your mapping.csv file
+4. Click 'Start Processing' to begin anonymization
+5. Click 'Stop Processing' to stop the current processing operation
+
+⚠️ IMPORTANT: All file paths must be absolute paths (full paths), not relative paths!""")
         self.instructions.config(state="disabled")
         
         # Mapping file path

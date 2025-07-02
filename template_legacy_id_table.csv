@@ -1,0 +1,6 @@
+patient_id,mrn,study_id,consent_status
+12345,MRN-67890,STU-001,granted
+54321,MRN-11111,STU-002,granted
+98765,MRN-22222,STU-003,revoked
+11111,MRN-33333,STU-004,none
+77777,MRN-44444,STU-005,granted 

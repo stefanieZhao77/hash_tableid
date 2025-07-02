@@ -112,14 +112,62 @@ class IDProcessor:
         
         return list(files)
 
-    def create_id_mapping(self, mapping_file_path: Path, mapping_df: pd.DataFrame) -> tuple[Dict[str, str], Dict[str, str]]:
+    def create_id_mapping(self, mapping_file_path: Path, mapping_df: pd.DataFrame, source_context: str = None) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
         """Create a mapping of original IDs to hashed IDs based on relationships in mapping file."""
         # Read the mapping table
         mapping_table = self.read_file(mapping_file_path)
         
-        # Create dictionaries to store ID relationships and consent status
+        # Validate the new structure or handle legacy format
+        if 'person_id' in mapping_table.columns:
+            # New enhanced structure
+            self.validate_id_mapping_structure(mapping_table)
+            return self._create_person_centric_mapping(mapping_table, source_context)
+        else:
+            # Legacy structure - convert and process
+            self._send_status("Using legacy mapping structure. Consider upgrading to new format.")
+            return self._create_legacy_mapping(mapping_table, mapping_df)
+
+    def _create_person_centric_mapping(self, mapping_table: pd.DataFrame, source_context: str = None) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+        """Create mappings using the new person-centric structure."""
         id_mapping = {}
         consent_status_mapping = {}
+        person_mapping = {}  # Maps person_id to hashed_id
+        
+        # Group by person_id to ensure consistent hashing per person
+        for person_id, person_records in mapping_table.groupby('person_id'):
+            consent_status = person_records.iloc[0]['consent_status'].lower()
+            
+            if consent_status not in ['granted', 'revoked', 'none', 'id not found']:
+                consent_status = 'none'
+            
+            # Only hash IDs if consent is granted
+            if consent_status == 'granted':
+                # Use person_id as the base for hashing to ensure consistency
+                hashed_id = self.hash_id(person_id)
+                person_mapping[person_id] = hashed_id
+                
+                # Map all IDs for this person to the same hash
+                for _, record in person_records.iterrows():
+                    id_key = f"{record['id_value']}_{record['id_type']}"
+                    if source_context:
+                        id_key += f"_{source_context}"
+                    id_mapping[id_key] = hashed_id
+                    consent_status_mapping[id_key] = consent_status
+            else:
+                # Store consent status for all IDs belonging to this person
+                for _, record in person_records.iterrows():
+                    id_key = f"{record['id_value']}_{record['id_type']}"
+                    if source_context:
+                        id_key += f"_{source_context}"
+                    consent_status_mapping[id_key] = consent_status
+        
+        return id_mapping, consent_status_mapping, person_mapping
+
+    def _create_legacy_mapping(self, mapping_table: pd.DataFrame, mapping_df: pd.DataFrame) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+        """Handle legacy mapping structure for backward compatibility."""
+        id_mapping = {}
+        consent_status_mapping = {}
+        person_mapping = {}
         
         # First, establish relationships from the mapping table
         for _, row in mapping_table.iterrows():
@@ -144,9 +192,9 @@ class IDProcessor:
                 for id_val in ids_in_row:
                     consent_status_mapping[id_val] = consent_status
         
-        return id_mapping, consent_status_mapping
+        return id_mapping, consent_status_mapping, person_mapping
 
-    def update_file_ids(self, file_path: Path, id_column: str, id_mapping: Dict[str, str], consent_status_mapping: Dict[str, str]) -> None:
+    def update_file_ids(self, file_path: Path, id_column: str, id_mapping: Dict[str, str], consent_status_mapping: Dict[str, str], id_type: str = None, source_context: str = None) -> None:
         """Update IDs in a file using the provided ID mapping and create training table."""
         if not self.is_running:
             self._send_status(f"Skipping {file_path} as processing was stopped")
@@ -167,18 +215,40 @@ class IDProcessor:
         original_ids = df[id_column].astype(str).unique()
         self._send_status(f"Found {len(original_ids)} unique IDs to process in {file_path}")
         
+        # Helper function to create lookup key
+        def create_lookup_key(id_val, id_type, source_context):
+            key = f"{id_val}_{id_type}" if id_type else str(id_val)
+            if source_context:
+                key += f"_{source_context}"
+            return key
+        
         # Add consent_status column to original table
-        df['consent_status'] = df[id_column].astype(str).map(lambda x: consent_status_mapping.get(x, 'ID not found'))
+        if id_type and source_context:
+            # New structure - use enhanced lookup
+            df['consent_status'] = df[id_column].astype(str).map(
+                lambda x: consent_status_mapping.get(create_lookup_key(x, id_type, source_context), 'ID not found')
+            )
+        else:
+            # Legacy structure
+            df['consent_status'] = df[id_column].astype(str).map(lambda x: consent_status_mapping.get(x, 'ID not found'))
         
         # Track IDs that aren't being hashed
         for id_val in original_ids:
-            if str(id_val) not in id_mapping:
+            lookup_key = create_lookup_key(id_val, id_type, source_context) if id_type else str(id_val)
+            if lookup_key not in id_mapping:
                 self.not_hashed_ids.add(str(id_val))
         
         # Create training table with only granted consent records and hashed IDs
         training_df = df[df['consent_status'] == 'granted'].copy()
         # Update IDs in training table only
-        training_df[id_column] = training_df[id_column].astype(str).map(lambda x: id_mapping.get(x, x))
+        if id_type and source_context:
+            # New structure - use enhanced lookup
+            training_df[id_column] = training_df[id_column].astype(str).map(
+                lambda x: id_mapping.get(create_lookup_key(x, id_type, source_context), x)
+            )
+        else:
+            # Legacy structure
+            training_df[id_column] = training_df[id_column].astype(str).map(lambda x: id_mapping.get(x, x))
         training_file_path = file_path.parent / f"{file_path.stem}_training{file_path.suffix}"
         
         # Create a temporary file in the same directory as the target file
@@ -251,21 +321,46 @@ class IDProcessor:
                     pass
             gc.collect()
 
-    def create_lookup_table(self, id_mapping: Dict[str, str], consent_status_mapping: Dict[str, str]) -> pd.DataFrame:
+    def create_lookup_table(self, id_mapping: Dict[str, str], consent_status_mapping: Dict[str, str], person_mapping: Dict[str, str] = None) -> pd.DataFrame:
         """Create a lookup table of original IDs and their hashed values."""
         records = []
         processed_ids = set()
         
-        # First add all IDs from the mapping that have granted consent
-        for original_id, hashed_id in id_mapping.items():
-            if consent_status_mapping.get(original_id) == 'granted':
+        # Add person mappings if available (new structure)
+        if person_mapping:
+            for person_id, hashed_id in person_mapping.items():
                 records.append({
-                    'original_id': original_id,
+                    'person_id': person_id,
+                    'original_id': person_id,
                     'hashed_id': hashed_id,
                     'consent_status': 'granted',
                     'from_mapping': True
                 })
-                processed_ids.add(original_id)
+                processed_ids.add(person_id)
+        
+        # First add all IDs from the mapping that have granted consent
+        for original_id, hashed_id in id_mapping.items():
+            if consent_status_mapping.get(original_id) == 'granted':
+                # Parse ID key to extract components if it's in new format
+                id_parts = original_id.split('_')
+                actual_id = id_parts[0] if len(id_parts) > 1 else original_id
+                id_type = id_parts[1] if len(id_parts) > 1 else None
+                source_context = id_parts[2] if len(id_parts) > 2 else None
+                
+                record = {
+                    'original_id': actual_id,
+                    'hashed_id': hashed_id,
+                    'consent_status': 'granted',
+                    'from_mapping': True
+                }
+                
+                if id_type:
+                    record['id_type'] = id_type
+                if source_context:
+                    record['source_context'] = source_context
+                    
+                records.append(record)
+                processed_ids.add(actual_id)
         
         # Then add any additional IDs that were hashed and have granted consent
         for original_id, hashed_id in self.hash_table.items():
@@ -332,7 +427,16 @@ class IDProcessor:
                 self._send_status("Added 'processed' column to mapping file to record file status")
             else:
                 # Convert existing processed column to boolean, treating NaN as False
-                mapping_df['processed'] = mapping_df['processed'].fillna(False).astype(bool)
+                # Handle string values properly: "False" -> False, "True" -> True
+                def convert_to_bool(val):
+                    if pd.isna(val) or val == '' or val == 'False' or val == 'false' or val is False or val == 0:
+                        return False
+                    elif val == 'True' or val == 'true' or val is True or val == 1:
+                        return True
+                    else:
+                        return False  # Default to False for any unexpected values
+                
+                mapping_df['processed'] = mapping_df['processed'].apply(convert_to_bool)
                 
             self._send_status(f"Successfully read mapping file with {len(mapping_df)} entries")
         except Exception as e:
@@ -349,6 +453,10 @@ class IDProcessor:
         # Get unprocessed rows using boolean indexing
         unprocessed_rows = mapping_df[mapping_df['processed'] == False]
         self._send_status(f"Found {len(unprocessed_rows)} files to process ({len(mapping_df) - len(unprocessed_rows)} already processed)")
+        
+        # Debug: Show the processed column values
+        self._send_status(f"DEBUG: Processed column values: {mapping_df['processed'].tolist()}")
+        self._send_status(f"DEBUG: Processed column data types: {mapping_df['processed'].dtype}")
         
         if len(unprocessed_rows) == 0:
             self._send_status("No files to process - all files are marked as processed")
@@ -374,7 +482,9 @@ class IDProcessor:
             
             # Create ID mapping based on relationships in mapping file
             self._send_status("Creating ID mappings from relationships...")
-            id_mapping, consent_status_mapping = self.create_id_mapping(mapping_file_path, mapping_df)
+            # Extract source context from mapping_df if available
+            source_context = mapping_df.get('source_context', pd.Series()).iloc[0] if 'source_context' in mapping_df.columns else None
+            id_mapping, consent_status_mapping, person_mapping = self.create_id_mapping(mapping_file_path, mapping_df, source_context)
             self._send_status(f"Created {len(id_mapping)} ID mappings")
             if self.progress_callback:
                 self.progress_callback(25)  # 25% after creating ID mapping
@@ -393,7 +503,10 @@ class IDProcessor:
                 source_path = next(f for f in files if f.name == Path(source_file).name)
                 
                 if source_path.name != mapping_file and not row['processed']:  # Skip mapping file and processed files
-                    self.update_file_ids(source_path, source_id, id_mapping, consent_status_mapping)
+                    # Extract id_type from mapping_df if available
+                    id_type = row.get('id_type', source_id) if 'id_type' in row else None
+                    file_context = row.get('source_context', source_context) if 'source_context' in row else source_context
+                    self.update_file_ids(source_path, source_id, id_mapping, consent_status_mapping, id_type, file_context)
                     processed_files += 1
                     # Update processed status in the DataFrame
                     mapping_df.loc[idx, 'processed'] = True
@@ -411,7 +524,7 @@ class IDProcessor:
                     self.progress_callback(progress)
 
              # Update lookup table after each file is processed
-            lookup_df = self.create_lookup_table(id_mapping, consent_status_mapping)
+            lookup_df = self.create_lookup_table(id_mapping, consent_status_mapping, person_mapping)
             lookup_path = Path('id_lookup_table.csv')
             lookup_df.to_csv(lookup_path, index=False)
             self._send_status(f"Updated lookup table with {len(lookup_df)} entries")
@@ -430,6 +543,58 @@ class IDProcessor:
             raise
         finally:
             self.is_running = False
+
+    def resolve_id_conflicts(self, mapping_table: pd.DataFrame, id_value: str, id_type: str, source_context: str = None) -> str:
+        """Resolve conflicts when the same ID appears for multiple people."""
+        # Filter records for this specific ID and type
+        id_records = mapping_table[
+            (mapping_table['id_value'].astype(str) == str(id_value)) & 
+            (mapping_table['id_type'] == id_type)
+        ]
+        
+        if len(id_records) == 0:
+            return None
+            
+        # If source_context is provided, prefer matching context
+        if source_context:
+            context_matches = id_records[id_records['source_context'] == source_context]
+            if len(context_matches) > 0:
+                id_records = context_matches
+        
+        # Sort by priority (lower number = higher priority), then by effective_date
+        id_records = id_records.sort_values(['priority', 'effective_date'], ascending=[True, False])
+        
+        # Return the person_id of the highest priority record
+        return id_records.iloc[0]['person_id']
+
+    def get_person_for_id(self, mapping_table: pd.DataFrame, id_value: str, id_type: str, source_context: str = None) -> tuple:
+        """Get person_id and consent_status for a given ID in a specific context."""
+        person_id = self.resolve_id_conflicts(mapping_table, id_value, id_type, source_context)
+        
+        if person_id is None:
+            return None, 'ID not found'
+            
+        # Get consent status for this person
+        person_records = mapping_table[mapping_table['person_id'] == person_id]
+        if len(person_records) > 0:
+            consent_status = person_records.iloc[0]['consent_status']
+            return person_id, consent_status
+            
+        return person_id, 'ID not found'
+
+    def validate_id_mapping_structure(self, mapping_table: pd.DataFrame) -> None:
+        """Validate the new mapping table structure."""
+        required_columns = ['person_id', 'id_value', 'id_type', 'source_context', 'priority', 'consent_status']
+        missing_columns = [col for col in required_columns if col not in mapping_table.columns]
+        
+        if missing_columns:
+            raise ValueError(f"Missing required columns in mapping table: {missing_columns}")
+            
+        # Check for invalid consent statuses
+        valid_statuses = ['granted', 'revoked', 'none', 'ID not found']
+        invalid_statuses = mapping_table[~mapping_table['consent_status'].isin(valid_statuses)]
+        if len(invalid_statuses) > 0:
+            self._send_status(f"Warning: Found {len(invalid_statuses)} records with invalid consent status")
 
 
 def main():

@@ -1,0 +1,4 @@
+mapping_file,mapping_id,source_file,source_id,processed
+C:\YourProject\legacy_id_table.csv,patient_id,C:\YourProject\table1.csv,id_a,FALSE
+C:\YourProject\legacy_id_table.csv,mrn,C:\YourProject\table2.csv,id_b,FALSE
+C:\YourProject\legacy_id_table.csv,study_id,C:\YourProject\table3.csv,id_c,FALSE 
