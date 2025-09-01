@@ -2,4 +2,5 @@ mapping_file,mapping_id,source_file,source_id,id_type,source_context,processed
 C:\YourProject\id_mapping_table.csv,,C:\YourProject\patient_data.csv,patient_id,mobi_id,main_study,FALSE
 C:\YourProject\id_mapping_table.csv,,C:\YourProject\clinical_records.csv,mrn,mrn,main_study,FALSE
 C:\YourProject\id_mapping_table.csv,,C:\YourProject\lab_results.csv,subject_id,mobi_id,lab_study,FALSE
-C:\YourProject\id_mapping_table.csv,,C:\YourProject\survey_data.csv,participant_id,study_id,survey_study,FALSE 
+C:\YourProject\id_mapping_table.csv,,C:\YourProject\survey_data.csv,participant_id,study_id,survey_study,FALSE
+C:\YourProject\id_mapping_table.csv,,C:\YourProject\followup_data.csv,patient_id,mobi_id,followup_study,FALSE 

@@ -148,17 +148,25 @@ class IDProcessor:
                 
                 # Map all IDs for this person to the same hash
                 for _, record in person_records.iterrows():
+                    # Create key based on id_value and id_type
                     id_key = f"{record['id_value']}_{record['id_type']}"
-                    if source_context:
+                    
+                    # Only add source_context to key if it's provided and not empty
+                    if source_context and str(source_context).strip() and str(source_context).lower() != 'nan':
                         id_key += f"_{source_context}"
+                    
                     id_mapping[id_key] = hashed_id
                     consent_status_mapping[id_key] = consent_status
             else:
                 # Store consent status for all IDs belonging to this person
                 for _, record in person_records.iterrows():
+                    # Create key based on id_value and id_type
                     id_key = f"{record['id_value']}_{record['id_type']}"
-                    if source_context:
+                    
+                    # Only add source_context to key if it's provided and not empty
+                    if source_context and str(source_context).strip() and str(source_context).lower() != 'nan':
                         id_key += f"_{source_context}"
+                    
                     consent_status_mapping[id_key] = consent_status
         
         return id_mapping, consent_status_mapping, person_mapping
@@ -218,7 +226,7 @@ class IDProcessor:
         # Helper function to create lookup key
         def create_lookup_key(id_val, id_type, source_context):
             key = f"{id_val}_{id_type}" if id_type else str(id_val)
-            if source_context:
+            if source_context and str(source_context).strip() and str(source_context).lower() != 'nan':
                 key += f"_{source_context}"
             return key
         
@@ -343,11 +351,22 @@ class IDProcessor:
             if consent_status_mapping.get(original_id) == 'granted':
                 # Parse ID key to extract components if it's in new format
                 id_parts = original_id.split('_')
-                actual_id = id_parts[0] if len(id_parts) > 1 else original_id
-                id_type = id_parts[1] if len(id_parts) > 1 else None
-                source_context = id_parts[2] if len(id_parts) > 2 else None
+                
+                # Handle different key formats:
+                # Format 1: "id_value_id_type" (2 parts)
+                # Format 2: "id_value_id_type_source_context" (3 parts)
+                if len(id_parts) >= 2:
+                    actual_id = id_parts[0]
+                    id_type = id_parts[1]
+                    source_context = id_parts[2] if len(id_parts) > 2 else None
+                else:
+                    # Fallback for legacy format
+                    actual_id = original_id
+                    id_type = None
+                    source_context = None
                 
                 record = {
+                    'person_id': '',  # Will be filled if we can match to person_mapping
                     'original_id': actual_id,
                     'hashed_id': hashed_id,
                     'consent_status': 'granted',
@@ -366,6 +385,7 @@ class IDProcessor:
         for original_id, hashed_id in self.hash_table.items():
             if original_id not in processed_ids and consent_status_mapping.get(original_id) == 'granted':
                 records.append({
+                    'person_id': '',
                     'original_id': original_id,
                     'hashed_id': hashed_id,
                     'consent_status': 'granted'
@@ -375,17 +395,38 @@ class IDProcessor:
         # Add all remaining IDs from consent_status_mapping that weren't processed
         for original_id, status in consent_status_mapping.items():
             if original_id not in processed_ids:
-                records.append({
-                    'original_id': original_id,
-                    'hashed_id': original_id,  # Use original ID as no hashing was done
+                # Parse ID key to extract components
+                id_parts = original_id.split('_')
+                
+                if len(id_parts) >= 2:
+                    actual_id = id_parts[0]
+                    id_type = id_parts[1]
+                    source_context = id_parts[2] if len(id_parts) > 2 else None
+                else:
+                    actual_id = original_id
+                    id_type = None
+                    source_context = None
+                
+                record = {
+                    'person_id': '',
+                    'original_id': actual_id,
+                    'hashed_id': actual_id,  # Use original ID as no hashing was done
                     'consent_status': status
-                })
-                processed_ids.add(original_id)
+                }
+                
+                if id_type:
+                    record['id_type'] = id_type
+                if source_context:
+                    record['source_context'] = source_context
+                    
+                records.append(record)
+                processed_ids.add(actual_id)
         
         # Add all non-hashed IDs that we found in the data tables
         for original_id in self.not_hashed_ids:
             if original_id not in processed_ids:
                 records.append({
+                    'person_id': '',
                     'original_id': original_id,
                     'hashed_id': original_id,  # Use original ID as no hashing was done
                     'consent_status': 'ID not found',
@@ -482,9 +523,8 @@ class IDProcessor:
             
             # Create ID mapping based on relationships in mapping file
             self._send_status("Creating ID mappings from relationships...")
-            # Extract source context from mapping_df if available
-            source_context = mapping_df.get('source_context', pd.Series()).iloc[0] if 'source_context' in mapping_df.columns else None
-            id_mapping, consent_status_mapping, person_mapping = self.create_id_mapping(mapping_file_path, mapping_df, source_context)
+            # Don't extract source_context from mapping_df - we'll use individual file contexts
+            id_mapping, consent_status_mapping, person_mapping = self.create_id_mapping(mapping_file_path, mapping_df, None)
             self._send_status(f"Created {len(id_mapping)} ID mappings")
             if self.progress_callback:
                 self.progress_callback(25)  # 25% after creating ID mapping
@@ -503,9 +543,18 @@ class IDProcessor:
                 source_path = next(f for f in files if f.name == Path(source_file).name)
                 
                 if source_path.name != mapping_file and not row['processed']:  # Skip mapping file and processed files
-                    # Extract id_type from mapping_df if available
+                    # Extract id_type and source_context from the individual row
                     id_type = row.get('id_type', source_id) if 'id_type' in row else None
-                    file_context = row.get('source_context', source_context) if 'source_context' in row else source_context
+                    file_context = row.get('source_context', None) if 'source_context' in row else None
+                    
+                    # Create file-specific ID mappings if needed
+                    if file_context is not None:
+                        # Create a new mapping for this specific file context
+                        file_id_mapping, file_consent_mapping, _ = self.create_id_mapping(mapping_file_path, mapping_df, file_context)
+                        # Merge with existing mappings
+                        id_mapping.update(file_id_mapping)
+                        consent_status_mapping.update(file_consent_mapping)
+                    
                     self.update_file_ids(source_path, source_id, id_mapping, consent_status_mapping, id_type, file_context)
                     processed_files += 1
                     # Update processed status in the DataFrame

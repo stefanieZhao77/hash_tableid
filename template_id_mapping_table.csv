@@ -1,12 +1,10 @@
 person_id,id_value,id_type,source_context,priority,consent_status,effective_date,notes
-PERSON_001,12345,mobi_id,main_study,1,granted,2024-01-01,Primary patient in main study
-PERSON_001,MRN-67890,mrn,main_study,1,granted,2024-01-01,Same patient medical record
-PERSON_001,STU-001,study_id,survey_study,2,granted,2024-02-01,Same patient in survey
-PERSON_002,12345,mobi_id,lab_study,1,revoked,2024-01-15,Different patient with same ID - consent withdrawn
-PERSON_002,LAB-999,subject_id,lab_study,1,revoked,2024-01-15,Lab subject - consent withdrawn
-PERSON_003,54321,mobi_id,main_study,1,granted,2024-01-02,Different patient
-PERSON_003,MRN-11111,mrn,main_study,1,granted,2024-01-02,Medical record for patient 3
-PERSON_004,98765,mobi_id,main_study,1,none,2024-01-03,No consent status provided
-PERSON_004,MRN-22222,mrn,main_study,1,none,2024-01-03,No consent status provided
-PERSON_005,11111,patient_id,main_study,1,granted,2024-01-04,Standard case
-PERSON_005,MRN-33333,mrn,main_study,1,granted,2024-01-04,Standard case 
+PERSON_001,12345,mobi_id,main_study,1,granted,2024-01-01,Primary mobile ID for main study
+PERSON_001,DD-0100-1234,mrn,main_study,1,granted,2024-01-01,Primary MRN for main study
+PERSON_001,12345,mobi_id,lab_study,2,granted,2024-01-15,Same mobile ID used in lab study
+PERSON_001,67890,study_id,survey_study,1,granted,2024-02-01,Survey study ID
+PERSON_001,12345,mobi_id,followup_study,3,revoked,2024-03-01,Follow-up study ID (consent revoked)
+PERSON_002,12345,mobi_id,secondary_study,1,granted,2024-01-10,Different person with same mobile ID
+PERSON_002,DD-0100-5678,mrn,secondary_study,1,granted,2024-01-10,Primary MRN for secondary study
+PERSON_003,99999,mobi_id,main_study,1,none,2024-01-05,Person with no consent
+PERSON_003,DD-0100-9999,mrn,main_study,1,none,2024-01-05,MRN for person with no consent 
